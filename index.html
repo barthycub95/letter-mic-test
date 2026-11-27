@@ -2,8 +2,8 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Тест записи письма</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Тест письма Деду Морозу</title>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
@@ -28,7 +28,7 @@
       width: min(100%, 460px);
       padding: 26px;
       border-radius: 24px;
-      background: #fff;
+      background: white;
       box-shadow: 0 12px 40px rgba(39, 73, 110, 0.12);
     }
 
@@ -65,7 +65,7 @@
       line-height: 1.4;
     }
 
-    .recording-panel {
+    #recordingPanel {
       display: flex;
       align-items: center;
       gap: 10px;
@@ -77,11 +77,11 @@
       font-weight: 700;
     }
 
-    .recording-panel[hidden] {
+    #recordingPanel[hidden] {
       display: none;
     }
 
-    .recording-dot {
+    .dot {
       width: 13px;
       height: 13px;
       flex: 0 0 13px;
@@ -92,7 +92,6 @@
 
     #elapsed {
       margin-left: auto;
-      white-space: nowrap;
       font-variant-numeric: tabular-nums;
     }
 
@@ -106,16 +105,15 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 10px;
-      margin-top: 10px;
     }
 
     button {
-      min-height: 54px;
+      min-height: 58px;
       padding: 12px;
       border: 0;
       border-radius: 14px;
       background: #3978ac;
-      color: #fff;
+      color: white;
       font-size: 16px;
       font-weight: 600;
       cursor: pointer;
@@ -124,11 +122,6 @@
     button:disabled {
       background: #c8d2dc;
       cursor: default;
-    }
-
-    audio {
-      width: 100%;
-      margin-top: 16px;
     }
 
     .footnote {
@@ -143,7 +136,7 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .recording-dot {
+      .dot {
         animation: none;
       }
     }
@@ -155,10 +148,13 @@
     <div class="label">ТЕСТ МИКРОФОНА</div>
     <h1>Письмо Деду Морозу</h1>
 
-    <p>Нажмите «Записать», а когда появится красная точка — начинайте говорить.</p>
+    <p>
+      Нажмите «Записать». Когда появится красная точка,
+      можно начинать говорить.
+    </p>
 
     <p class="privacy">
-      Это тест: запись не отправляется и не сохраняется на сервере. Она доступна,
+      Это тест: запись никуда не отправляется и доступна только
       пока открыта эта страница.
     </p>
 
@@ -166,141 +162,195 @@
       Нажмите «Записать», чтобы начать.
     </div>
 
-    <div id="recordingPanel" class="recording-panel" hidden>
-      <span class="recording-dot" aria-hidden="true"></span>
-      <span>Идёт запись</span>
+    <div id="recordingPanel" hidden>
+      <span class="dot" aria-hidden="true"></span>
+      <span>Запись</span>
       <span id="elapsed">00:00 / 02:00</span>
     </div>
 
     <div class="buttons">
-      <button id="start">🎙 Записать</button>
-      <button id="stop" disabled>⏹ Остановить</button>
+      <button id="record">🎙 Записать</button>
+      <button id="pauseStop" disabled>⏸ Пауза</button>
+      <button id="play" disabled>🔊 Прослушать</button>
+      <button id="restart" disabled>↻ Записать заново</button>
     </div>
 
-    <div class="buttons">
-      <button id="play" disabled>▶ Прослушать</button>
-      <button id="again" disabled>↻ Записать заново</button>
-    </div>
-
-    <audio id="player" controls hidden></audio>
+    <audio id="player" hidden></audio>
 
     <p class="footnote">
-      Таймер показывает прошедшее время. Можно остановить запись раньше;
-      максимум для теста — 2 минуты.
+      Максимум для теста — 2 минуты записи.
+      Время на паузе не учитывается.
     </p>
   </main>
 
   <script>
-    const MAX_SECONDS = 120;
+    const MAX_MS = 120000;
 
     const telegramApp = window.Telegram && window.Telegram.WebApp;
+
     if (telegramApp) {
       telegramApp.ready();
       telegramApp.expand();
     }
 
-    const startButton = document.getElementById("start");
-    const stopButton = document.getElementById("stop");
+    const recordButton = document.getElementById("record");
+    const pauseStopButton = document.getElementById("pauseStop");
     const playButton = document.getElementById("play");
-    const againButton = document.getElementById("again");
-    const statusBox = document.getElementById("status");
+    const restartButton = document.getElementById("restart");
+
     const recordingPanel = document.getElementById("recordingPanel");
-    const elapsed = document.getElementById("elapsed");
+    const elapsedDisplay = document.getElementById("elapsed");
+    const statusBox = document.getElementById("status");
     const player = document.getElementById("player");
 
-    let mediaRecorder = null;
-    let audioStream = null;
-    let audioChunks = [];
+    let recorder = null;
+    let stream = null;
+    let chunks = [];
     let audioUrl = null;
-    let recordingStartedAt = 0;
-    let timerInterval = null;
-    let limitTimer = null;
-    let startupTimer = null;
-    let reachedLimit = false;
-    let recordingFailed = false;
 
-    function showStatus(message) {
-      statusBox.textContent = message;
+    let state = "initial";
+    let recordedMs = 0;
+    let segmentStartedAt = 0;
+    let timer = null;
+    let restartAfterStop = false;
+    let failed = false;
+    let stoppedAtLimit = false;
+
+    function setStatus(text) {
+      statusBox.textContent = text;
     }
 
-    function formatTime(totalSeconds) {
+    function formatTime(milliseconds) {
+      const totalSeconds = Math.floor(milliseconds / 1000);
       const minutes = Math.floor(totalSeconds / 60);
       const seconds = totalSeconds % 60;
 
       return String(minutes).padStart(2, "0") + ":" +
-             String(seconds).padStart(2, "0");
+        String(seconds).padStart(2, "0");
     }
 
-    function updateElapsed() {
-      const seconds = Math.min(
-        Math.floor((Date.now() - recordingStartedAt) / 1000),
-        MAX_SECONDS
-      );
+    function currentRecordedMs() {
+      if (state === "recording") {
+        return Math.min(
+          MAX_MS,
+          recordedMs + performance.now() - segmentStartedAt
+        );
+      }
 
-      elapsed.textContent =
-        formatTime(seconds) + " / " + formatTime(MAX_SECONDS);
+      return Math.min(MAX_MS, recordedMs);
     }
 
-    function stopMicrophone() {
-      if (audioStream) {
-        audioStream.getTracks().forEach(track => track.stop());
-        audioStream = null;
+    function updateTimer() {
+      const current = currentRecordedMs();
+
+      elapsedDisplay.textContent =
+        formatTime(current) + " / 02:00";
+
+      if (state === "recording" && current >= MAX_MS) {
+        stoppedAtLimit = true;
+        recordedMs = MAX_MS;
+        stopRecording();
       }
     }
 
-    function clearPlayback() {
+    function stopTimer() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function releaseMicrophone() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+    }
+
+    function clearAudio() {
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+
       if (audioUrl) {
         URL.revokeObjectURL(audioUrl);
         audioUrl = null;
       }
-
-      player.pause();
-      player.removeAttribute("src");
-      player.load();
-      player.hidden = true;
-      playButton.disabled = true;
-      againButton.disabled = true;
     }
 
-    function stopRecording() {
-      if (limitTimer) {
-        clearTimeout(limitTimer);
-        limitTimer = null;
-      }
+    function updateButtons() {
+      recordButton.textContent =
+        state === "paused" ? "▶ Продолжить" : "🎙 Записать";
 
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
-      } else {
-        stopMicrophone();
-      }
+      pauseStopButton.textContent =
+        state === "paused" ? "⏹ Остановить" : "⏸ Пауза";
+
+      recordButton.disabled =
+        state !== "initial" && state !== "paused";
+
+      pauseStopButton.disabled =
+        state !== "recording" && state !== "paused";
+
+      playButton.disabled = state !== "finished";
+
+      restartButton.disabled =
+        state !== "paused" && state !== "finished";
     }
 
-    startButton.addEventListener("click", async () => {
-      clearPlayback();
-      audioChunks = [];
-      reachedLimit = false;
-      recordingFailed = false;
+    function setState(newState) {
+      state = newState;
+      updateButtons();
+    }
 
-      startButton.disabled = true;
-      stopButton.disabled = true;
+    function makeAudio() {
+      const format =
+        (recorder && recorder.mimeType) ||
+        (chunks[0] && chunks[0].type) ||
+        "";
 
-      // Здесь специально не показываем статус и индикатор:
-      // запись ещё не началась.
+      const blob = format
+        ? new Blob(chunks, { type: format })
+        : new Blob(chunks);
+
+      if (!blob.size) {
+        return false;
+      }
+
+      clearAudio();
+      audioUrl = URL.createObjectURL(blob);
+      player.src = audioUrl;
+      return true;
+    }
+
+    async function startNewRecording() {
+      clearAudio();
+      chunks = [];
+      recordedMs = 0;
+      restartAfterStop = false;
+      failed = false;
+      stoppedAtLimit = false;
+
+      recordingPanel.hidden = true;
+      elapsedDisplay.textContent = "00:00 / 02:00";
+
+      setState("starting");
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        startButton.disabled = false;
-        showStatus("Браузер не смог открыть микрофон. Проверьте, что страница открыта по HTTPS.");
+        setState("initial");
+        setStatus("Браузер не смог открыть микрофон.");
         return;
       }
 
       if (typeof MediaRecorder === "undefined") {
-        startButton.disabled = false;
-        showStatus("Этот браузер не поддерживает запись. Попробуйте открыть страницу в другом браузере.");
+        setState("initial");
+        setStatus("Этот браузер не поддерживает запись.");
         return;
       }
 
       try {
-        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: true
+        });
 
         const formats = [
           "audio/mp4;codecs=mp4a.40.2",
@@ -315,144 +365,198 @@
           MediaRecorder.isTypeSupported(format)
         );
 
-        mediaRecorder = supportedFormat
-          ? new MediaRecorder(audioStream, { mimeType: supportedFormat })
-          : new MediaRecorder(audioStream);
+        recorder = supportedFormat
+          ? new MediaRecorder(stream, { mimeType: supportedFormat })
+          : new MediaRecorder(stream);
 
-        mediaRecorder.ondataavailable = event => {
-          if (event.data && event.data.size > 0) {
-            audioChunks.push(event.data);
-          }
-        };
-
-        mediaRecorder.onstart = () => {
-          if (startupTimer) {
-            clearTimeout(startupTimer);
-            startupTimer = null;
-          }
-
-          // Индикатор и таймер появляются только после старта записи.
-          recordingStartedAt = Date.now();
+        recorder.onstart = () => {
+          segmentStartedAt = performance.now();
+          setState("recording");
           recordingPanel.hidden = false;
-          stopButton.disabled = false;
-          showStatus("Запись началась — можно говорить.");
 
-          updateElapsed();
-          timerInterval = setInterval(updateElapsed, 250);
+          setStatus("Запись началась — можно говорить.");
 
-          limitTimer = setTimeout(() => {
-            reachedLimit = true;
-            stopRecording();
-          }, MAX_SECONDS * 1000);
+          updateTimer();
+          timer = setInterval(updateTimer, 250);
         };
 
-        mediaRecorder.onerror = () => {
-          recordingFailed = true;
-          stopRecording();
-        };
+        recorder.onpause = () => {
+          stopTimer();
 
-        mediaRecorder.onstop = () => {
-          if (timerInterval) {
-            clearInterval(timerInterval);
-            timerInterval = null;
-          }
+          recordedMs = Math.min(
+            MAX_MS,
+            recordedMs + performance.now() - segmentStartedAt
+          );
 
-          if (limitTimer) {
-            clearTimeout(limitTimer);
-            limitTimer = null;
-          }
-
-          if (startupTimer) {
-            clearTimeout(startupTimer);
-            startupTimer = null;
-          }
-
+          setState("paused");
           recordingPanel.hidden = true;
-          stopMicrophone();
+          updateTimer();
 
-          startButton.disabled = false;
-          stopButton.disabled = true;
+          setStatus("Запись на паузе. Можно продолжить или остановить.");
+        };
 
-          if (recordingFailed) {
-            recordingFailed = false;
-            showStatus("Во время записи произошла ошибка. Попробуйте ещё раз.");
+        recorder.onresume = () => {
+          segmentStartedAt = performance.now();
+          setState("recording");
+          recordingPanel.hidden = false;
+
+          setStatus("Запись продолжается.");
+
+          updateTimer();
+          timer = setInterval(updateTimer, 250);
+        };
+
+        recorder.ondataavailable = event => {
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        };
+
+        recorder.onerror = () => {
+          failed = true;
+
+          if (recorder && recorder.state !== "inactive") {
+            recorder.stop();
+          } else {
+            stopTimer();
+            releaseMicrophone();
+            setState("initial");
+            setStatus("Произошла ошибка записи. Попробуйте ещё раз.");
+          }
+        };
+
+        recorder.onstop = () => {
+          stopTimer();
+          recordingPanel.hidden = true;
+          releaseMicrophone();
+
+          if (restartAfterStop) {
+            restartAfterStop = false;
+            startNewRecording();
             return;
           }
 
-          const stoppedAtLimit = reachedLimit;
-          reachedLimit = false;
-
-          const format =
-            mediaRecorder.mimeType ||
-            (audioChunks[0] && audioChunks[0].type) ||
-            "";
-
-          const recording = format
-            ? new Blob(audioChunks, { type: format })
-            : new Blob(audioChunks);
-
-          if (recording.size === 0) {
-            showStatus("Запись не получилась. Попробуйте ещё раз.");
+          if (failed) {
+            failed = false;
+            setState("initial");
+            setStatus("Произошла ошибка записи. Попробуйте ещё раз.");
             return;
           }
 
-          audioUrl = URL.createObjectURL(recording);
-          player.src = audioUrl;
-          player.hidden = false;
-          playButton.disabled = false;
-          againButton.disabled = false;
+          const audioReady = makeAudio();
+
+          if (!audioReady) {
+            setState("initial");
+            setStatus("Запись не получилась. Попробуйте ещё раз.");
+            return;
+          }
+
+          setState("finished");
 
           if (stoppedAtLimit) {
-            showStatus("Достигнут максимум 2 минуты. Запись готова к прослушиванию.");
+            setStatus("Достигнут максимум 2 минуты. Запись готова.");
           } else {
-            showStatus("Запись готова. Прослушайте её или запишите заново.");
+            setStatus("Запись остановлена. Её можно прослушать.");
           }
         };
 
-        mediaRecorder.start();
-
-        startupTimer = setTimeout(() => {
-          if (mediaRecorder && mediaRecorder.state === "inactive") {
-            stopMicrophone();
-            startButton.disabled = false;
-            showStatus("Запись не запустилась. Обновите страницу и попробуйте ещё раз.");
-          }
-        }, 10000);
+        recorder.start();
       } catch (error) {
-        if (startupTimer) {
-          clearTimeout(startupTimer);
-          startupTimer = null;
-        }
-
-        stopMicrophone();
-        startButton.disabled = false;
-        stopButton.disabled = true;
+        releaseMicrophone();
+        setState("initial");
 
         if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-          showStatus("Нет доступа к микрофону. Разрешите его в настройках браузера или телефона.");
+          setStatus("Нет доступа к микрофону. Разрешите его в настройках телефона или браузера.");
         } else if (error.name === "NotFoundError") {
-          showStatus("Не удалось найти микрофон на устройстве.");
+          setStatus("Не удалось найти микрофон.");
         } else {
-          showStatus("Не удалось начать запись. Обновите страницу и попробуйте ещё раз.");
+          setStatus("Не удалось начать запись. Попробуйте ещё раз.");
+        }
+      }
+    }
+
+    function stopRecording() {
+      if (!recorder || recorder.state === "inactive") {
+        return;
+      }
+
+      stopTimer();
+      recordingPanel.hidden = true;
+      setState("stopping");
+
+      try {
+        recorder.stop();
+      } catch (error) {
+        releaseMicrophone();
+        setState("initial");
+        setStatus("Не удалось остановить запись. Попробуйте ещё раз.");
+      }
+    }
+
+    recordButton.addEventListener("click", () => {
+      if (state === "initial") {
+        startNewRecording();
+        return;
+      }
+
+      if (state === "paused" && recorder) {
+        setState("resuming");
+
+        try {
+          recorder.resume();
+        } catch (error) {
+          setState("paused");
+          setStatus("Не удалось продолжить запись.");
         }
       }
     });
 
-    stopButton.addEventListener("click", stopRecording);
+    pauseStopButton.addEventListener("click", () => {
+      if (state === "recording" && recorder) {
+        setState("pausing");
+
+        try {
+          recorder.pause();
+        } catch (error) {
+          setState("recording");
+          setStatus("Не удалось поставить запись на паузу.");
+        }
+
+        return;
+      }
+
+      if (state === "paused") {
+        stopRecording();
+      }
+    });
 
     playButton.addEventListener("click", () => {
+      if (state !== "finished" || !audioUrl) {
+        return;
+      }
+
+      player.currentTime = 0;
       player.play().catch(() => {
-        showStatus("Не получилось воспроизвести запись. Попробуйте записать её ещё раз.");
+        setStatus("Не удалось воспроизвести запись.");
       });
     });
 
-    againButton.addEventListener("click", () => {
-      clearPlayback();
-      audioChunks = [];
-      startButton.disabled = false;
-      elapsed.textContent = "00:00 / " + formatTime(MAX_SECONDS);
-      showStatus("Можно записать новую тестовую фразу.");
+    restartButton.addEventListener("click", () => {
+      if (state !== "paused" && state !== "finished") {
+        return;
+      }
+
+      clearAudio();
+
+      if (recorder && recorder.state !== "inactive") {
+        restartAfterStop = true;
+        stopRecording();
+      } else {
+        startNewRecording();
+      }
     });
+
+    updateButtons();
   </script>
 </body>
 </html>
