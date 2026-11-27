@@ -65,6 +65,43 @@
       line-height: 1.4;
     }
 
+    .recording-panel {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 12px 0;
+      padding: 13px;
+      border-radius: 14px;
+      background: #fff0f0;
+      color: #a32222;
+      font-weight: 700;
+    }
+
+    .recording-panel[hidden] {
+      display: none;
+    }
+
+    .recording-dot {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 13px;
+      border-radius: 50%;
+      background: #e53939;
+      animation: pulse 1s infinite;
+    }
+
+    #elapsed {
+      margin-left: auto;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    @keyframes pulse {
+      50% {
+        opacity: 0.35;
+      }
+    }
+
     .buttons {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -78,7 +115,7 @@
       border: 0;
       border-radius: 14px;
       background: #3978ac;
-      color: white;
+      color: #fff;
       font-size: 16px;
       font-weight: 600;
       cursor: pointer;
@@ -104,6 +141,12 @@
         grid-template-columns: 1fr;
       }
     }
+
+    @media (prefers-reduced-motion: reduce) {
+      .recording-dot {
+        animation: none;
+      }
+    }
   </style>
 </head>
 
@@ -112,15 +155,21 @@
     <div class="label">ТЕСТ МИКРОФОНА</div>
     <h1>Письмо Деду Морозу</h1>
 
-    <p>Запишите короткую тестовую фразу, а затем прослушайте её.</p>
+    <p>Нажмите «Записать», а когда появится красная точка — начинайте говорить.</p>
 
     <p class="privacy">
-      Запись не отправляется и не сохраняется на сервере. Она доступна только
+      Это тест: запись не отправляется и не сохраняется на сервере. Она доступна,
       пока открыта эта страница.
     </p>
 
     <div id="status" role="status" aria-live="polite">
-      Нажмите «Записать» и разрешите доступ к микрофону.
+      Нажмите «Записать», чтобы начать.
+    </div>
+
+    <div id="recordingPanel" class="recording-panel" hidden>
+      <span class="recording-dot" aria-hidden="true"></span>
+      <span>Идёт запись</span>
+      <span id="elapsed">00:00 / 02:00</span>
     </div>
 
     <div class="buttons">
@@ -135,10 +184,15 @@
 
     <audio id="player" controls hidden></audio>
 
-    <p class="footnote">Длина тестовой записи — не более 20 секунд.</p>
+    <p class="footnote">
+      Таймер показывает прошедшее время. Можно остановить запись раньше;
+      максимум для теста — 2 минуты.
+    </p>
   </main>
 
   <script>
+    const MAX_SECONDS = 120;
+
     const telegramApp = window.Telegram && window.Telegram.WebApp;
     if (telegramApp) {
       telegramApp.ready();
@@ -150,16 +204,41 @@
     const playButton = document.getElementById("play");
     const againButton = document.getElementById("again");
     const statusBox = document.getElementById("status");
+    const recordingPanel = document.getElementById("recordingPanel");
+    const elapsed = document.getElementById("elapsed");
     const player = document.getElementById("player");
 
     let mediaRecorder = null;
     let audioStream = null;
     let audioChunks = [];
     let audioUrl = null;
-    let stopTimer = null;
+    let recordingStartedAt = 0;
+    let timerInterval = null;
+    let limitTimer = null;
+    let startupTimer = null;
+    let reachedLimit = false;
+    let recordingFailed = false;
 
     function showStatus(message) {
       statusBox.textContent = message;
+    }
+
+    function formatTime(totalSeconds) {
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+
+      return String(minutes).padStart(2, "0") + ":" +
+             String(seconds).padStart(2, "0");
+    }
+
+    function updateElapsed() {
+      const seconds = Math.min(
+        Math.floor((Date.now() - recordingStartedAt) / 1000),
+        MAX_SECONDS
+      );
+
+      elapsed.textContent =
+        formatTime(seconds) + " / " + formatTime(MAX_SECONDS);
     }
 
     function stopMicrophone() {
@@ -184,9 +263,9 @@
     }
 
     function stopRecording() {
-      if (stopTimer) {
-        clearTimeout(stopTimer);
-        stopTimer = null;
+      if (limitTimer) {
+        clearTimeout(limitTimer);
+        limitTimer = null;
       }
 
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
@@ -199,13 +278,23 @@
     startButton.addEventListener("click", async () => {
       clearPlayback();
       audioChunks = [];
+      reachedLimit = false;
+      recordingFailed = false;
+
+      startButton.disabled = true;
+      stopButton.disabled = true;
+
+      // Здесь специально не показываем статус и индикатор:
+      // запись ещё не началась.
 
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showStatus("Не удалось открыть микрофон. Откройте страницу по HTTPS в современном браузере.");
+        startButton.disabled = false;
+        showStatus("Браузер не смог открыть микрофон. Проверьте, что страница открыта по HTTPS.");
         return;
       }
 
       if (typeof MediaRecorder === "undefined") {
+        startButton.disabled = false;
         showStatus("Этот браузер не поддерживает запись. Попробуйте открыть страницу в другом браузере.");
         return;
       }
@@ -214,15 +303,15 @@
         audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         const formats = [
-          "audio/mp4",
           "audio/mp4;codecs=mp4a.40.2",
+          "audio/mp4",
           "audio/webm;codecs=opus",
           "audio/webm",
           "audio/ogg;codecs=opus"
         ];
 
         const supportedFormat = formats.find(format =>
-          MediaRecorder.isTypeSupported &&
+          typeof MediaRecorder.isTypeSupported === "function" &&
           MediaRecorder.isTypeSupported(format)
         );
 
@@ -236,7 +325,63 @@
           }
         };
 
+        mediaRecorder.onstart = () => {
+          if (startupTimer) {
+            clearTimeout(startupTimer);
+            startupTimer = null;
+          }
+
+          // Индикатор и таймер появляются только после старта записи.
+          recordingStartedAt = Date.now();
+          recordingPanel.hidden = false;
+          stopButton.disabled = false;
+          showStatus("Запись началась — можно говорить.");
+
+          updateElapsed();
+          timerInterval = setInterval(updateElapsed, 250);
+
+          limitTimer = setTimeout(() => {
+            reachedLimit = true;
+            stopRecording();
+          }, MAX_SECONDS * 1000);
+        };
+
+        mediaRecorder.onerror = () => {
+          recordingFailed = true;
+          stopRecording();
+        };
+
         mediaRecorder.onstop = () => {
+          if (timerInterval) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+          }
+
+          if (limitTimer) {
+            clearTimeout(limitTimer);
+            limitTimer = null;
+          }
+
+          if (startupTimer) {
+            clearTimeout(startupTimer);
+            startupTimer = null;
+          }
+
+          recordingPanel.hidden = true;
+          stopMicrophone();
+
+          startButton.disabled = false;
+          stopButton.disabled = true;
+
+          if (recordingFailed) {
+            recordingFailed = false;
+            showStatus("Во время записи произошла ошибка. Попробуйте ещё раз.");
+            return;
+          }
+
+          const stoppedAtLimit = reachedLimit;
+          reachedLimit = false;
+
           const format =
             mediaRecorder.mimeType ||
             (audioChunks[0] && audioChunks[0].type) ||
@@ -245,11 +390,6 @@
           const recording = format
             ? new Blob(audioChunks, { type: format })
             : new Blob(audioChunks);
-
-          stopMicrophone();
-
-          startButton.disabled = false;
-          stopButton.disabled = true;
 
           if (recording.size === 0) {
             showStatus("Запись не получилась. Попробуйте ещё раз.");
@@ -262,26 +402,34 @@
           playButton.disabled = false;
           againButton.disabled = false;
 
-          showStatus("Запись готова. Нажмите «Прослушать» или запишите заново.");
+          if (stoppedAtLimit) {
+            showStatus("Достигнут максимум 2 минуты. Запись готова к прослушиванию.");
+          } else {
+            showStatus("Запись готова. Прослушайте её или запишите заново.");
+          }
         };
 
         mediaRecorder.start();
 
-        startButton.disabled = true;
-        stopButton.disabled = false;
-        playButton.disabled = true;
-        againButton.disabled = true;
-
-        showStatus("Идёт запись. Максимальная длительность — 20 секунд.");
-
-        stopTimer = setTimeout(stopRecording, 20000);
+        startupTimer = setTimeout(() => {
+          if (mediaRecorder && mediaRecorder.state === "inactive") {
+            stopMicrophone();
+            startButton.disabled = false;
+            showStatus("Запись не запустилась. Обновите страницу и попробуйте ещё раз.");
+          }
+        }, 10000);
       } catch (error) {
+        if (startupTimer) {
+          clearTimeout(startupTimer);
+          startupTimer = null;
+        }
+
         stopMicrophone();
         startButton.disabled = false;
         stopButton.disabled = true;
 
         if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-          showStatus("Нет доступа к микрофону. Разрешите его для браузера или Telegram в настройках телефона.");
+          showStatus("Нет доступа к микрофону. Разрешите его в настройках браузера или телефона.");
         } else if (error.name === "NotFoundError") {
           showStatus("Не удалось найти микрофон на устройстве.");
         } else {
@@ -302,6 +450,7 @@
       clearPlayback();
       audioChunks = [];
       startButton.disabled = false;
+      elapsed.textContent = "00:00 / " + formatTime(MAX_SECONDS);
       showStatus("Можно записать новую тестовую фразу.");
     });
   </script>
